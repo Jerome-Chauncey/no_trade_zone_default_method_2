@@ -23,6 +23,10 @@ input string  ExcludedDates     = "";       // back-test: "YYYY.MM.DD,..."
 //―――――― Globals & State ――――――――――――――――――――――――――――――――――――――――――
 CTrade    trade;
 string    Sym;
+double NYHigh = -DBL_MAX;
+double NYLow  = DBL_MAX;
+bool   NYActive = false;
+
 
 // pending-stop tickets we placed
 ulong     BuyTicket       = 0;
@@ -99,6 +103,52 @@ void CheckSkipFromCSV()
    }
    FileClose(fh);
 }
+
+void BackfillAsiaRange()
+{
+   AsiaHigh = -DBL_MAX;
+   AsiaLow  = DBL_MAX;
+
+   datetime now = TimeCurrent();
+   MqlDateTime dt;
+   TimeToStruct(now, dt);
+
+   // Build today timestamps
+   datetime dayStart  = StringToTime(
+      StringFormat("%04d.%02d.%02d 00:00", dt.year, dt.mon, dt.day)
+   );
+
+   datetime asiaStart = dayStart + 3*3600;
+   datetime asiaEnd   = dayStart + 9*3600;
+
+   // If before Asia session, nothing to do
+   if(now < asiaStart)
+      return;
+
+   // Decide end point
+   datetime calcEnd = (now < asiaEnd ? now : asiaEnd);
+
+   int startBar = iBarShift(Sym, PERIOD_M1, asiaStart, false);
+   int endBar   = iBarShift(Sym, PERIOD_M1, calcEnd,  false);
+
+   if(startBar < 0 || endBar < 0)
+      return;
+
+   for(int i = startBar; i >= endBar; i--)
+   {
+      double hi = iHigh(Sym, PERIOD_M1, i);
+      double lo = iLow (Sym, PERIOD_M1, i);
+
+      if(hi > AsiaHigh) AsiaHigh = hi;
+      if(lo < AsiaLow)  AsiaLow  = lo;
+   }
+
+   PrintFormat(
+      "Asia backfilled. High=%.5f Low=%.5f",
+      AsiaHigh, AsiaLow
+   );
+}
+
 
 //+------------------------------------------------------------------+
 //| Log every CSV event for today into Journal                      |
@@ -196,8 +246,27 @@ int OnInit()
    Sym = StringLen(TradeSymbol)>0 ? TradeSymbol : _Symbol;
    trade.SetExpertMagicNumber(MagicNumber);
    EnsureRangeLabel();
+
+   datetime now = TimeCurrent();
+   MqlDateTime dt;
+   TimeToStruct(now, dt);
+   lastResetDate = dt.year*10000 + dt.mon*100 + dt.day;
+
+   BackfillAsiaRange();
+   BackfillNTZRange();
+   BackfillNYRange();
+
+   // Late-attach guard: after NTZ window
+   if(TimeCurrent() >= StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 10:00"))
+   {
+      OrdersPlaced = true;
+   }
+
    return(INIT_SUCCEEDED);
 }
+
+
+
 
 //+------------------------------------------------------------------+
 //| Expert deinitialization                                         |
@@ -356,7 +425,78 @@ void OnTick()
    if(NTZDefined) ManageTakeProfits();
    if(!PositionOpened && PositionSelect(Sym))
       PositionOpened=true;
+      
+   if(NYActive)
+   {
+      NYHigh = MathMax(NYHigh, iHigh(Sym, PERIOD_M1, 0));
+      NYLow  = MathMin(NYLow,  iLow (Sym, PERIOD_M1, 0));
+   }
+
 }
+
+void BackfillNTZRange()
+{
+   NTZHigh  = -DBL_MAX;
+   NTZLow   = DBL_MAX;
+   NTZRange = 0.0;
+   NTZDefined = false;
+   frankOpen = 0;
+
+   datetime now = TimeCurrent();
+   MqlDateTime dt;
+   TimeToStruct(now, dt);
+
+   datetime dayStart = StringToTime(
+      StringFormat("%04d.%02d.%02d 00:00", dt.year, dt.mon, dt.day)
+   );
+
+   datetime ntzStart = dayStart + 9*3600;
+   datetime ntzEnd   = dayStart + 10*3600;
+
+   // Before NTZ session
+   if(now < ntzStart)
+      return;
+
+   // Mark Frankfurt open
+   frankOpen = ntzStart;
+
+   // Decide end point
+   datetime calcEnd = (now < ntzEnd ? now : ntzEnd);
+
+   int startBar = iBarShift(Sym, PERIOD_M1, ntzStart, false);
+   int endBar   = iBarShift(Sym, PERIOD_M1, calcEnd,  false);
+
+   if(startBar < 0 || endBar < 0)
+      return;
+
+   for(int i = startBar; i >= endBar; i--)
+   {
+      double hi = iHigh(Sym, PERIOD_M1, i);
+      double lo = iLow (Sym, PERIOD_M1, i);
+
+      if(hi > NTZHigh) NTZHigh = hi;
+      if(lo < NTZLow)  NTZLow  = lo;
+   }
+
+   // Only finalize after 10:00
+   if(now >= ntzEnd)
+   {
+      NTZRange   = NTZHigh - NTZLow;
+      NTZDefined = true;
+
+      PrintFormat(
+         "NTZ backfilled. High=%.5f Low=%.5f Range=%.1f pips",
+         NTZHigh,
+         NTZLow,
+         NTZRange / (_Point*10.0)
+      );
+   }
+   else
+   {
+      Print("NTZ building live. Frankfurt session active.");
+   }
+}
+
 
 //+------------------------------------------------------------------+
 //| Helpers                                                          |
@@ -447,6 +587,49 @@ void ManageTakeProfits()
       }
    }
 }
+void BackfillNYRange()
+{
+   NYHigh = -DBL_MAX;
+   NYLow  = DBL_MAX;
+   NYActive = false;
+
+   datetime now = TimeCurrent();
+   MqlDateTime dt;
+   TimeToStruct(now, dt);
+
+   datetime dayStart = StringToTime(
+      StringFormat("%04d.%02d.%02d 00:00", dt.year, dt.mon, dt.day)
+   );
+
+   datetime nyStart = dayStart + 16*3600;
+
+   // Before New York session
+   if(now < nyStart)
+      return;
+
+   NYActive = true;
+
+   int startBar = iBarShift(Sym, PERIOD_M1, nyStart, false);
+   int endBar   = iBarShift(Sym, PERIOD_M1, now,     false);
+
+   if(startBar < 0 || endBar < 0)
+      return;
+
+   for(int i = startBar; i >= endBar; i--)
+   {
+      double hi = iHigh(Sym, PERIOD_M1, i);
+      double lo = iLow (Sym, PERIOD_M1, i);
+
+      if(hi > NYHigh) NYHigh = hi;
+      if(lo < NYLow)  NYLow  = lo;
+   }
+
+   PrintFormat(
+      "NY backfilled. High=%.5f Low=%.5f",
+      NYHigh, NYLow
+   );
+}
+
 
 void DrawSessionSeparator(datetime t,color c,string p)
 {
