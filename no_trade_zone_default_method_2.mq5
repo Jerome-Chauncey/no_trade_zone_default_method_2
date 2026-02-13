@@ -512,8 +512,11 @@ void SetupTPLevels()
 }
 void PlacePendingOrders()
 {
-   BuyTicket  = trade.BuyStop (LotSize,NTZHigh+_Point,Sym,NTZLow-_Point,0,0,Slippage);
-   SellTicket = trade.SellStop(LotSize,NTZLow-_Point, Sym,NTZHigh+_Point,0,0,Slippage);
+   double pip = _Point * 10.0;
+
+   BuyTicket  = trade.BuyStop (LotSize, NTZHigh + pip, Sym, NTZLow - pip, 0, 0, Slippage);
+   SellTicket = trade.SellStop(LotSize, NTZLow  - pip, Sym, NTZHigh + pip, 0, 0, Slippage);
+
 }
 void DrawTPLevels()
 {
