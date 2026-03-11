@@ -7,7 +7,7 @@
 #property link        "https://github.com/Jerome-Chauncey"
 #property version     "1.16"
 #property strict
-#property tester_file "ff_news_mt5.csv"
+
 
 #include <Trade\Trade.mqh>
 
@@ -26,13 +26,20 @@ string    Sym;
 double NYHigh = -DBL_MAX;
 double NYLow  = DBL_MAX;
 bool   NYActive = false;
+int BrokerGMTOffset = 0;
+
+datetime AsiaStart;
+datetime FrankfurtOpen;
+datetime LondonOpen;
+datetime NewYorkOpen;
+datetime LondonClose;
 
 
 // pending-stop tickets we placed
 ulong     BuyTicket       = 0;
 ulong     SellTicket      = 0;
 
-bool      NO_TRADE_TODAY  = false;  // blocked by CSV
+
 bool      DoNotTradeDay   = false;  // Asia-too-big or manual
 bool      LondonClosed    = false;  // have we run the 19:00 cleanup?
 int       lastResetDate   = 0;      // YYYYMMDD
@@ -59,49 +66,20 @@ int       lastHour       = -1;
 #define OBJ_INFO       "NTZ_Info"
 #define OBJ_RANGE      "Asia_NTZ_Range"
 
-//+------------------------------------------------------------------+
-//| CSV blocker: skip on NFP, FOMC, ECB, Fed, Retail Sales, Holiday  |
-//+------------------------------------------------------------------+
-void CheckSkipFromCSV()
+datetime GMTToBroker(int hour,int minute=0)
 {
-   int fh=FileOpen("ff_news_mt5.csv",FILE_READ|FILE_CSV|FILE_ANSI);
-   if(fh==INVALID_HANDLE)
-   {
-      PrintFormat("❌ CSV open failed (%d)",GetLastError());
-      return;
-   }
-   // skip header
-   for(int i=0;i<4;i++) FileReadString(fh);
+   datetime gmtDay = StringToTime(TimeToString(TimeGMT(),TIME_DATE));
+   datetime gmtTime = gmtDay + hour*3600 + minute*60;
+   return gmtTime + BrokerGMTOffset;
+}
 
-   MqlDateTime nowDT; TimeToStruct(TimeCurrent(),nowDT);
-
-   while(!FileIsEnding(fh))
-   {
-      string ts  = FileReadString(fh);
-      string cur = FileReadString(fh);
-      FileReadString(fh);    // skip impact
-      string ev  = FileReadString(fh);
-
-      datetime t=StringToTime(ts);
-      if(t==0) continue;
-      MqlDateTime d; TimeToStruct(t,d);
-
-      if(d.year==nowDT.year && d.mon==nowDT.mon && d.day==nowDT.day)
-      {
-         if( StringFind(ev,"Payroll")>=0 ||
-             StringFind(ev,"FOMC")   >=0 ||
-             StringFind(ev,"ECB")    >=0 ||
-             StringFind(ev,"Fed")    >=0 ||
-             StringFind(ev,"Retail Sales")>=0 ||
-             StringFind(ev,"Holiday")>=0 )
-         {
-            PrintFormat("🚫 Blocker today [%s]: %s",cur,ev);
-            NO_TRADE_TODAY=true;
-            break;
-         }
-      }
-   }
-   FileClose(fh);
+void UpdateSessionTimes()
+{
+   AsiaStart     = GMTToBroker(0,0);
+   FrankfurtOpen = GMTToBroker(7,0);
+   LondonOpen    = GMTToBroker(8,0);
+   NewYorkOpen   = GMTToBroker(13,0);
+   LondonClose   = GMTToBroker(16,0);
 }
 
 void BackfillAsiaRange()
@@ -118,8 +96,8 @@ void BackfillAsiaRange()
       StringFormat("%04d.%02d.%02d 00:00", dt.year, dt.mon, dt.day)
    );
 
-   datetime asiaStart = dayStart + 3*3600;
-   datetime asiaEnd   = dayStart + 9*3600;
+   datetime asiaStart = AsiaStart;
+   datetime asiaEnd   = FrankfurtOpen;
 
    // If before Asia session, nothing to do
    if(now < asiaStart)
@@ -150,29 +128,7 @@ void BackfillAsiaRange()
 }
 
 
-//+------------------------------------------------------------------+
-//| Log every CSV event for today into Journal                      |
-//+------------------------------------------------------------------+
-void LogAllNewsOfDay()
-{
-   int fh=FileOpen("ff_news_mt5.csv",FILE_READ|FILE_CSV|FILE_ANSI);
-   if(fh==INVALID_HANDLE) return;
-   for(int i=0;i<4;i++) FileReadString(fh);
-   MqlDateTime nowDT; TimeToStruct(TimeCurrent(),nowDT);
 
-   while(!FileIsEnding(fh))
-   {
-      string ts=FileReadString(fh), cur=FileReadString(fh);
-      FileReadString(fh);
-      string ev=FileReadString(fh);
-      datetime t=StringToTime(ts);
-      if(t==0) continue;
-      MqlDateTime d; TimeToStruct(t,d);
-      if(d.year==nowDT.year&&d.mon==nowDT.mon&&d.day==nowDT.day)
-         PrintFormat("📢 News Today: %s | %s | %s",ts,cur,ev);
-   }
-   FileClose(fh);
-}
 
 //+------------------------------------------------------------------+
 //| Clear all daily objects except the bottom-range label           |
@@ -242,7 +198,9 @@ void CancelPendingOrders()
 //| Expert initialization                                           |
 //+------------------------------------------------------------------+
 int OnInit()
-{
+{  
+   BrokerGMTOffset = (int)(TimeCurrent() - TimeGMT());
+   UpdateSessionTimes();
    Sym = StringLen(TradeSymbol)>0 ? TradeSymbol : _Symbol;
    trade.SetExpertMagicNumber(MagicNumber);
    EnsureRangeLabel();
@@ -289,7 +247,7 @@ void OnTick()
    if(today!=lastResetDate)
    {
       lastResetDate=today;
-      NO_TRADE_TODAY=false;
+      
       DoNotTradeDay =false;
       LondonClosed  =false;
       frankOpen     =0;
@@ -304,11 +262,9 @@ void OnTick()
       ClearDailyLines();
       EnsureRangeLabel();
 
-      CheckSkipFromCSV();
-      LogAllNewsOfDay();
-      if(NO_TRADE_TODAY) Print("🛑 Halted for CSV blocker");
+      
 
-      if(!NO_TRADE_TODAY && StringLen(ExcludedDates)>0)
+      if(StringLen(ExcludedDates)>0)
       {
          string arr[]; int cnt=StringSplit(ExcludedDates,',',arr);
          for(int i=0;i<cnt;i++)
@@ -326,7 +282,7 @@ void OnTick()
    }
 
    // 2) London-close flat @19:00
-   if(!LondonClosed && dt.hour>=19)
+   if(!LondonClosed && now>=LondonClose)
    {
       CancelPendingOrders();
       if(PositionSelect(Sym))
@@ -348,30 +304,42 @@ void OnTick()
    }
 
    // 4) session separators
-   if(dt.hour!=lastHour && dt.min==0)
+   if(now>=AsiaStart && lastHour<1)
    {
-      lastHour=dt.hour;
-      switch(dt.hour)
-      {
-         case 3:  DrawSessionSeparator(now,clrYellow,PREF_ASIAN); break;
-         case 9:  DrawSessionSeparator(now,clrBlue,  PREF_FRANK); break;
-         case 10: DrawSessionSeparator(now,clrGreen, PREF_LON);   break;
-         case 16: DrawSessionSeparator(now,clrRed,   PREF_NY);    break;
-      }
+      DrawSessionSeparator(AsiaStart,clrYellow,PREF_ASIAN);
+      lastHour=1;
+   }
+   
+   if(now>=FrankfurtOpen && lastHour<2)
+   {
+      DrawSessionSeparator(FrankfurtOpen,clrBlue,PREF_FRANK);
+      lastHour=2;
+   }
+   
+   if(now>=LondonOpen && lastHour<3)
+   {
+      DrawSessionSeparator(LondonOpen,clrGreen,PREF_LON);
+      lastHour=3;
+   }
+   
+   if(now>=NewYorkOpen && lastHour<4)
+   {
+      DrawSessionSeparator(NewYorkOpen,clrRed,PREF_NY);
+      lastHour=4;
    }
 
    // 5) bail if blocked
-   if(NO_TRADE_TODAY||DoNotTradeDay) return;
+   if(DoNotTradeDay) return;
 
    // 6) build Asia 03–09
-   if(dt.hour>=3 && dt.hour<9)
+   if(now>=AsiaStart && now<FrankfurtOpen)
    {
       AsiaHigh=MathMax(AsiaHigh,iHigh(Sym,PERIOD_M1,0));
       AsiaLow =MathMin(AsiaLow, iLow (Sym,PERIOD_M1,0));
    }
 
    // 7) 09:00 NTZ start & threshold
-   if(dt.hour==9 && dt.min==0 && frankOpen==0)
+   if(now>=FrankfurtOpen && frankOpen==0)
    {
       double aP=(AsiaHigh-AsiaLow)/(_Point*10.0);
       if(aP>AsiaThresholdPips)
@@ -383,7 +351,7 @@ void OnTick()
    }
 
    // 8) build NTZ 09–10
-   if(frankOpen>0 && now<frankOpen+3600)
+   if(now>=FrankfurtOpen && now<LondonOpen)
    {
       NTZHigh=MathMax(NTZHigh,iHigh(Sym,PERIOD_M1,0));
       NTZLow =MathMin(NTZLow, iLow (Sym,PERIOD_M1,0));
@@ -391,7 +359,7 @@ void OnTick()
 
    // 9) place stops 09:57–10:00
    if(frankOpen>0 && !OrdersPlaced
-      && now>=frankOpen+57*60 && now<frankOpen+60*60)
+      && now>=LondonOpen-180 && now<LondonOpen)
    {
       NTZRange=NTZHigh-NTZLow;
       double nP=NTZRange/(_Point*10.0);
@@ -450,8 +418,8 @@ void BackfillNTZRange()
       StringFormat("%04d.%02d.%02d 00:00", dt.year, dt.mon, dt.day)
    );
 
-   datetime ntzStart = dayStart + 9*3600;
-   datetime ntzEnd   = dayStart + 10*3600;
+   datetime ntzStart = FrankfurtOpen;
+   datetime ntzEnd   = LondonOpen;
 
    // Before NTZ session
    if(now < ntzStart)
@@ -604,7 +572,7 @@ void BackfillNYRange()
       StringFormat("%04d.%02d.%02d 00:00", dt.year, dt.mon, dt.day)
    );
 
-   datetime nyStart = dayStart + 16*3600;
+   datetime nyStart = NewYorkOpen;
 
    // Before New York session
    if(now < nyStart)
